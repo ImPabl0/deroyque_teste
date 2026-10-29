@@ -1,0 +1,68 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Mock do provedor externo (POST /provider/v1/activate). Cenários em docker/wiremock/mappings.
+  provider-mock:
+    image: wiremock/wiremock:3.13.2
+    restart: unless-stopped
+    command: ["--global-response-templating", "--disable-banner"]
+    volumes:
+      - ./docker/wiremock:/home/wiremock:ro
+    ports:
+      - "${PROVIDER_PORT:-8089}:8080"
+
+  # Servidor de autorização de teste (OAuth 2.0 / JWT) para emitir tokens Client Credentials localmente.
+  oauth:
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    restart: unless-stopped
+    environment:
+      SERVER_PORT: 8080
+      JSON_CONFIG_PATH: /config/oauth.json
+    volumes:
+      - ./docker/oauth/oauth.json:/config/oauth.json:ro
+    ports:
+      - "${OAUTH_PORT:-8090}:8080"
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      provider-mock:
+        condition: service_started
+      oauth:
+        condition: service_started
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/${POSTGRES_DB}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      PROVIDER_BASE_URL: http://provider-mock:8080
+      PROVIDER_API_KEY: ${PROVIDER_API_KEY:-}
+      # Chaves buscadas pela rede interna; o emissor é o endereço usado pelo host para obter o token.
+      OAUTH_JWK_SET_URI: http://oauth:8080/default/jwks
+      OAUTH_ISSUER_URI: http://localhost:${OAUTH_PORT:-8090}/default
+      OAUTH_AUDIENCE: activation-service
+      LOGGING_STRUCTURED_FORMAT_CONSOLE: ${LOG_FORMAT:-ecs}
+      JAVA_OPTS: ${JAVA_OPTS:--XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    stop_grace_period: 30s
+
+volumes:
+  pgdata:
